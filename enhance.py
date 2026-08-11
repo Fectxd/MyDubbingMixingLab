@@ -60,11 +60,7 @@ def collect_inputs(paths: list[str]) -> list[Path]:
         p = Path(item)
         if p.is_dir():
             files.extend(
-                sorted(
-                    f
-                    for f in p.iterdir()
-                    if f.suffix.lower() in (".wav", ".flac", ".mp3", ".m4a", ".mp4")
-                )
+                sorted(f for f in p.iterdir() if f.suffix.lower() == ".wav")
             )
         elif p.is_file():
             files.append(p)
@@ -132,7 +128,7 @@ def enhance_file(
     n_fft = make_even(stft_cfg["n_fft"] * sr // stft_cfg["sampling_rate"])
     hop = make_even(stft_cfg["hop_size"] * sr // stft_cfg["sampling_rate"])
     win = make_even(stft_cfg["win_size"] * sr // stft_cfg["sampling_rate"])
-    compress = stft_cfg["compress_factor"]
+    compress = cfg["model_cfg"]["compress_factor"]
 
     enhanced = torch.zeros_like(noisy_t)
     window_sum = torch.zeros_like(noisy_t)
