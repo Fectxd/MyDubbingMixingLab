@@ -200,12 +200,24 @@ def main() -> int:
         if out.exists():
             print(f"     skip {f.name} (already enhanced)", flush=True)
             continue
-        t0 = time.time()
-        enhance_file(
-            f, out, model, cfg, torch, mps, mpi, pttm, device,
-            args.chunk_size, args.hop_portion, args.bwe,
-        )
-        print(f"     {f.name} -> {out.name} ({time.time() - t0:.1f}s)", flush=True)
+        chunk = args.chunk_size
+        while True:
+            t0 = time.time()
+            try:
+                enhance_file(
+                    f, out, model, cfg, torch, mps, mpi, pttm, device,
+                    chunk, args.hop_portion, args.bwe,
+                )
+                print(f"     {f.name} -> {out.name} ({time.time() - t0:.1f}s)", flush=True)
+                break
+            except RuntimeError as e:
+                if "out of memory" not in str(e).lower():
+                    raise
+                if chunk <= 0.3:
+                    raise
+                chunk = max(0.3, chunk / 2.0)
+                torch.cuda.empty_cache()
+                print(f"     显存不足，分块自动降到 {chunk:.2f}s 重试 ...", flush=True)
 
     print(f"[3/3] done. enhanced files in {outdir}", flush=True)
     keep_system_awake(False)
