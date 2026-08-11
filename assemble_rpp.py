@@ -165,7 +165,10 @@ def build_project(actor_files: list[Path], out_path: Path) -> dict:
         duration, _, _, _ = probe_audio(src)
         track = Track(name=label)
         project.add(track)
-        track.add(Item(Source(file=str(src.resolve())), position=0.0, length=duration))
+        source = Source(file=str(src.resolve()))
+        if source.name == "SOURCE SECTION" and src.suffix.lower() == ".wav":
+            source.name = "SOURCE WAVE"  # reathon only maps lowercase ".wav"
+        track.add(Item(source, position=0.0, length=duration))
         manifest_tracks.append(
             {
                 "kind": "actor",
