@@ -134,26 +134,27 @@ def enhance_file(
     window_sum = torch.zeros_like(noisy_t)
     n_chunks = max(1, math.ceil((noisy_t.shape[1] - chunk_size) / hop_length) + 1)
 
-    for i in range(n_chunks):
-        chunk = noisy_t[:, i * hop_length : i * hop_length + chunk_size]
-        noisy_mag, noisy_pha, _ = mag_phase_stft(
-            chunk, n_fft=n_fft, hop_size=hop, win_size=win,
-            compress_factor=compress, center=True, addeps=False,
-        )
-        amp_g, pha_g, _ = model(noisy_mag, noisy_pha)
-        mag = torch.expm1(RELU(amp_g))
-        zero_portion = torch.sum(mag == 0, 1) / mag.shape[1]
-        amp_g[:, :, (zero_portion > 0.5)[0]] = 0
-        audio_g = mag_phase_istft(
-            amp_g, pha_g, n_fft, hop, win, compress
-        )
-        audio_g = pad_or_trim_to_match(chunk.detach(), audio_g, pad_value=1e-8)
-        enhanced[:, i * hop_length : i * hop_length + chunk_size] += (
-            audio_g * window[0 : audio_g.shape[1]]
-        )
-        window_sum[:, i * hop_length : i * hop_length + chunk_size] += window[
-            0 : audio_g.shape[1]
-        ]
+    with torch.no_grad():
+        for i in range(n_chunks):
+            chunk = noisy_t[:, i * hop_length : i * hop_length + chunk_size]
+            noisy_mag, noisy_pha, _ = mag_phase_stft(
+                chunk, n_fft=n_fft, hop_size=hop, win_size=win,
+                compress_factor=compress, center=True, addeps=False,
+            )
+            amp_g, pha_g, _ = model(noisy_mag, noisy_pha)
+            mag = torch.expm1(RELU(amp_g))
+            zero_portion = torch.sum(mag == 0, 1) / mag.shape[1]
+            amp_g[:, :, (zero_portion > 0.5)[0]] = 0
+            audio_g = mag_phase_istft(
+                amp_g, pha_g, n_fft, hop, win, compress
+            )
+            audio_g = pad_or_trim_to_match(chunk.detach(), audio_g, pad_value=1e-8)
+            enhanced[:, i * hop_length : i * hop_length + chunk_size] += (
+                audio_g * window[0 : audio_g.shape[1]]
+            )
+            window_sum[:, i * hop_length : i * hop_length + chunk_size] += window[
+                0 : audio_g.shape[1]
+            ]
 
     nonzero = window_sum > 1e-8
     enhanced[:, nonzero[0]] = enhanced[:, nonzero[0]] / window_sum[:, nonzero[0]]
