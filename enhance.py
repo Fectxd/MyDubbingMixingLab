@@ -76,9 +76,15 @@ def load_model(device: str):
     import torch.nn as nn
     from huggingface_hub import hf_hub_download
 
-    from models.generator_SEMamba_time_d4 import SEMamba
-    from models.stfts import mag_phase_istft, mag_phase_stft  # noqa: F401
-    from utils.util import pad_or_trim_to_match  # noqa: F401
+    try:
+        from models.generator_SEMamba_time_d4 import SEMamba
+        from models.stfts import mag_phase_istft, mag_phase_stft  # noqa: F401
+        from utils.util import pad_or_trim_to_match  # noqa: F401
+    except ModuleNotFoundError as e:
+        raise SystemExit(
+            f"RE-USE 依赖缺失（{e.name}）。mamba-ssm 要求 CUDA 11.8+，老驱动机器无法本地跑；"
+            "请用 colab_full_pipeline.ipynb 在免费 GPU 上跑，或改用其他降噪模型。"
+        )
 
     global RELU
     RELU = nn.ReLU()
