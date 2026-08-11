@@ -117,23 +117,26 @@ def load_model(device: str):
     return model, torch
 
 
-def install_progress(model, total_sessions: int) -> None:
+def install_progress(model, total_sessions: int) -> list[dict]:
     """Print per-chunk progress while the model splits the long file.
 
     TIGER-DnR chops the mixture into 12s sessions with a 4s hop; each
     `forward` call below processes exactly one session, so counting calls
     gives us reliable progress for each of the three sub-models.
     """
+    states = []
     for label, sub in (("对白", model.dialog), ("音效", model.effect), ("音乐", model.music)):
         original = sub.forward
-        counter = {"n": 0}
+        st = {"n": 0, "total": total_sessions}
+        states.append(st)
 
-        def wrapped(x, _orig=original, _label=label, _c=counter):
-            _c["n"] += 1
-            print(f"     {_label}: 第 {_c['n']}/{total_sessions} 段", flush=True)
+        def wrapped(x, _orig=original, _label=label, _st=st):
+            _st["n"] += 1
+            print(f"     {_label}: 第 {_st['n']}/{_st['total']} 段", flush=True)
             return _orig(x)
 
         sub.forward = wrapped
+    return states
 
 
 def count_sessions(n_samples: int, sr: int, chunk_secs: float = 12.0, hop_secs: float = 4.0) -> int:
@@ -198,7 +201,7 @@ def main() -> int:
     chunk_secs = max(6.0, min(float(args.chunk), 60.0))
     hop_secs = chunk_secs / 3.0
     total_sessions = count_sessions(audio.shape[1], sr, chunk_secs, hop_secs)
-    install_progress(model, total_sessions)
+    states = install_progress(model, total_sessions)
     print(
         f"[3/3] separating ({chunk_secs:.0f}s windows x {total_sessions} chunks "
         f"x dialogue/effect/music, overlap-add averaging), "
@@ -209,23 +212,29 @@ def main() -> int:
     with torch.no_grad():
         for name, label in STEMS:
             t0 = time.time()
-            # Each call returns [3, channels, samples]; the model names the
-            # wanted source at a fixed index per sub-model, so take [2]/[1]/[0].
-            if name == "dialog":
-                track = model.wav_chunk_inference(
-                    model.dialog, mixture[None],
-                    target_length=chunk_secs, hop_length=hop_secs,
-                )[2]
-            elif name == "effect":
-                track = model.wav_chunk_inference(
-                    model.effect, mixture[None],
-                    target_length=chunk_secs, hop_length=hop_secs,
-                )[1]
-            else:
-                track = model.wav_chunk_inference(
-                    model.music, mixture[None],
-                    target_length=chunk_secs, hop_length=hop_secs,
-                )[0]
+            idx = {"dialog": 2, "effect": 1, "music": 0}[name]
+            sub = {"dialog": model.dialog, "effect": model.effect, "music": model.music}[name]
+            while True:
+                try:
+                    track = model.wav_chunk_inference(
+                        sub, mixture[None],
+                        target_length=chunk_secs, hop_length=hop_secs,
+                    )[idx]
+                    break
+                except RuntimeError as e:
+                    if "out of memory" not in str(e).lower():
+                        raise
+                    if chunk_secs <= 3.0:
+                        raise
+                    chunk_secs = max(3.0, chunk_secs / 2.0)
+                    hop_secs = chunk_secs / 3.0
+                    for st in states:
+                        st["total"] = count_sessions(audio.shape[1], sr, chunk_secs, hop_secs)
+                    torch.cuda.empty_cache()
+                    print(
+                        f"     显存不足，窗口自动降到 {chunk_secs:.0f}s 重试 ...",
+                        flush=True,
+                    )
             elapsed += time.time() - t0
             out_path = outdir / f"{stem}_{name}.wav"
             save_stem(out_path, track)
@@ -235,6 +244,7 @@ def main() -> int:
                 f"({out_path.stat().st_size / 1e6:.1f} MB)",
                 flush=True,
             )
+            torch.cuda.empty_cache()
 
     results = {"input": str(input_path), "sample_rate": SAMPLE_RATE,
                "seconds": float(audio.shape[1] / sr), "elapsed_s": round(elapsed, 1),
