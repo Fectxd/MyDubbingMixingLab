@@ -188,6 +188,10 @@ def main() -> int:
         import torch
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cuda":
+        import torch
+
+        torch.backends.cudnn.benchmark = True
     print(f"[2/3] loading TIGER-DnR ({MODEL_ID}) on {device} ...")
     model, torch = load_model(device)
 

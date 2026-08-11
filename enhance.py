@@ -167,9 +167,9 @@ def main() -> int:
     parser.add_argument("--inputs", nargs="+", required=True,
                         help="wav files or a folder to enhance")
     parser.add_argument("--outdir", default=str(PROJECT_ROOT / "work" / "enhanced"))
-    parser.add_argument("--chunk-size", type=float, default=0.6,
-                        help="enhancement window in seconds (default 0.6; "
-                             "RE-USE 的 CUDA 扫描内核内存占用巨大，大分块在 16GB 显卡上会直接 OOM 并泄漏显存)")
+    parser.add_argument("--chunk-size", type=float, default=5.0,
+                        help="enhancement window in seconds (default 5, official "
+                             "setting; no_grad 推理显存极小，5s 分块即可)")
     parser.add_argument("--hop-portion", type=float, default=0.5,
                         help="hop as a fraction of the chunk (default 0.5)")
     parser.add_argument("--bwe", type=int, default=None,
