@@ -40,11 +40,17 @@ jobs:
         run: |
           python separate.py --input "${{ inputs.input }}" --chunk ${{ inputs.chunk }} --device auto
 
+      - name: 排 Reaper 工程
+        run: |
+          python assemble_rpp.py --actors test
+
       - name: 上传分离结果
         uses: actions/upload-artifact@v4
         with:
-          name: separated-stems
+          name: dubbing-output
           path: |
             work/separated/*.wav
             work/separated/*.json
+            work/reaper/*.rpp
+            work/reaper/*.json
           if-no-files-found: error

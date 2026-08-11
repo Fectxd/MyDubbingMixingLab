@@ -126,11 +126,26 @@ def collect_actors(actor_dir: Path) -> list[Path]:
     return files
 
 
+def find_stems(separated_dir: Path) -> dict[str, Path]:
+    """Locate dialog/effect/music stems for whichever episode was separated."""
+    candidates = sorted(separated_dir.glob("*_dialog.wav"))
+    if not candidates:
+        raise SystemExit(
+            f"no separated stems (*_dialog.wav) found in {separated_dir}; "
+            "run separate.py first"
+        )
+    if len(candidates) > 1:
+        names = ", ".join(p.name for p in candidates)
+        raise SystemExit(
+            f"multiple episodes found ({names}); separate one episode per "
+            "work dir before assembling"
+        )
+    stem = candidates[0].name[: -len("_dialog.wav")]
+    return {name: separated_dir / f"{stem}_{name}.wav" for name in ("dialog", "effect", "music")}
+
+
 def build_project(actor_files: list[Path], out_path: Path) -> dict:
-    stems = {
-        name: SEPARATED_DIR / f"原片_{name}.wav"
-        for name in ("dialog", "effect", "music")
-    }
+    stems = find_stems(SEPARATED_DIR)
     missing = [str(p) for p in stems.values() if not p.exists()]
     if missing:
         raise SystemExit(

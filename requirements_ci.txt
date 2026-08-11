@@ -1,4 +1,5 @@
 # GitHub Actions（Linux runner）专用：torch 单独装 CPU 版（见 workflow）
+reathon>=0.0.9
 soundfile>=0.12
 numpy>=1.26
 huggingface_hub>=0.26

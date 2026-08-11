@@ -1,5 +1,5 @@
 work/
-models/
+/models/
 vendor/tiger/
 .pkg/
 __pycache__/
