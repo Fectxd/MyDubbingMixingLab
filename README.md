@@ -85,6 +85,22 @@ in/out 生成摆放计划（±5% 内自动写 PLAYRATE）→ reathon 生成 .RPP
 CPU 分离约 30~60 分钟，足够用。公开仓库还可改用 GPU runner（几分钟跑完）。
 模型权重每次由 runner 自动下载，不用提交进仓库。
 
+## 低质量干声修复：NVIDIA RE-USE（需要 GPU）
+
+演员干声如果来自手机/低质量麦克风，先修复再进工程：
+
+```bash
+python enhance.py --inputs test/*.wav --outdir work/enhanced
+```
+
+RE-USE 做降噪/去混响/带宽扩展/低质量麦克风修复。注意：
+- 官方模型**只支持 CUDA**（拒绝 CPU），用 Google Colab/Kaggle 免费 T4 GPU 跑。
+- 整条流水线的 Colab 一键版见 `colab_full_pipeline.ipynb`（GitHub 打开 →
+  Open in Colab）：上传原片 + 干声 → 分离 → 修复 → 排工程 → 打包下载。
+- 非商用许可（NSCLv1）：论文/非商业用途没问题。
+- 修复后的文件放 `work/enhanced/`，`assemble_rpp.py` 会自动优先使用它们
+  （有修复用修复，没有则用原始干声）。
+
 ## 已知边界
 
 - 分离不是无损的，背景轨可能残留原片对白；正式混音时建议给背景做

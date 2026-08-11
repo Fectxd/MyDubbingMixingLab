@@ -25,6 +25,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_ACTOR_DIR = PROJECT_ROOT / "test"
 SEPARATED_DIR = PROJECT_ROOT / "work" / "separated"
 PROCESSED_DIR = PROJECT_ROOT / "work" / "processed"
+ENHANCED_DIR = PROJECT_ROOT / "work" / "enhanced"
 DEFAULT_OUT = PROJECT_ROOT / "work" / "reaper" / "EP05_配音工程.rpp"
 SAMPLE_RATE = 44100
 
@@ -158,7 +159,9 @@ def build_project(actor_files: list[Path], out_path: Path) -> dict:
     for file in actor_files:
         actor, role = parse_actor_role(file.stem)
         label = f"{actor} ({role})" if role else actor
-        src, converted = normalize(file)
+        enhanced_path = ENHANCED_DIR / f"{file.stem}.wav"
+        use_enhanced = enhanced_path.exists()
+        src, converted = normalize(enhanced_path if use_enhanced else file)
         duration, _, _, _ = probe_audio(src)
         track = Track(name=label)
         project.add(track)
@@ -171,6 +174,7 @@ def build_project(actor_files: list[Path], out_path: Path) -> dict:
                 "role": role,
                 "source": str(src.resolve()),
                 "converted": converted,
+                "enhanced": use_enhanced,
                 "duration_s": round(duration, 3),
             }
         )
@@ -238,7 +242,11 @@ def main() -> int:
     print(f"project written: {manifest['project']}")
     print(f"tracks: {len(manifest['tracks'])}  manifest: {manifest_path}")
     for t in manifest["tracks"]:
-        note = " (converted)" if t.get("converted") else ""
+        note = ""
+        if t.get("enhanced"):
+            note += " (RE-USE enhanced)"
+        if t.get("converted"):
+            note += " (converted)"
         print(f"  - {t['name']}{note}")
     return 0
 

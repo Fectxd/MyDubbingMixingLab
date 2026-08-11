@@ -1,0 +1,12 @@
+# RE-USE 增强依赖（必须 CUDA；Google Colab/Kaggle 免费 GPU 可用）
+# Colab 已自带 CUDA 版 torch，只需：
+#   pip install mamba-ssm causal-conv1d einops pyyaml soundfile huggingface_hub safetensors
+torch>=2.0
+mamba-ssm>=2.2.0
+causal-conv1d>=1.4.0
+einops>=0.7
+pyyaml>=6.0
+soundfile>=0.12
+huggingface_hub>=0.26
+safetensors>=0.4
+numpy>=1.26
