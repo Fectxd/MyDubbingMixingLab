@@ -1,0 +1,6 @@
+# TIGER-DnR 分离在 1060 3G 机器上的依赖。
+# torch 由 run_separate.bat 单独安装 CUDA 版（cu121，支持 GTX 10 系 Pascal 架构）。
+numpy>=1.26
+soundfile>=0.12
+huggingface_hub>=0.26
+safetensors>=0.4

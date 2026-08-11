@@ -1,0 +1,20 @@
+{
+  "project": "demo",
+  "srt": "subtitles.es.srt",
+  "audio_dir": "audio",
+  "language": "es",
+  "tracks": [
+    {
+      "actor": "actor1",
+      "file": "actor1_take1.wav",
+      "line_ids": [1, 2, 3]
+    },
+    {
+      "actor": "actor2",
+      "file": "actor2_take1.wav",
+      "line_ids": [4, 5]
+    }
+  ],
+  "max_stretch": 0.05,
+  "device": "auto"
+}

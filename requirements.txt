@@ -1,0 +1,11 @@
+# —— 运行时依赖（RPP 生成 / 音频读写 / 模型加载）——
+reathon>=0.0.9
+soundfile>=0.12
+numpy>=1.26
+huggingface_hub>=0.26
+safetensors>=0.4
+
+# —— 可选：easyaligner 逐句对齐（自动带入 torch/transformers，体积大）——
+rapidfuzz>=3.0
+srt>=3.5
+easyaligner>=0.3.3

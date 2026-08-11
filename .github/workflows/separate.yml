@@ -1,0 +1,45 @@
+name: TIGER-DnR 分离
+
+on:
+  workflow_dispatch:
+    inputs:
+      input:
+        description: "要分离的视频/音频在仓库里的路径（如 test/原片.mp4）"
+        required: true
+        default: "test/原片.mp4"
+      chunk:
+        description: "推理窗口秒数：12 / 20 / 30（越大上下文越多、越慢）"
+        required: false
+        default: "12"
+
+jobs:
+  separate:
+    runs-on: ubuntu-latest
+    # 公开仓库想用 GPU runner（几分钟跑完）：把上面一行换成 GitHub 官方文档
+    # 里 GPU runner 的标签（如 ubuntu-24.04-gpu），私有仓库 GPU 是收费的。
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -r requirements_ci.txt
+
+      - name: 运行分离（防休眠在云端不需要，脚本自动忽略）
+        run: |
+          python separate.py --input "${{ inputs.input }}" --chunk ${{ inputs.chunk }} --device auto
+
+      - name: 上传分离结果
+        uses: actions/upload-artifact@v4
+        with:
+          name: separated-stems
+          path: |
+            work/separated/*.wav
+            work/separated/*.json
+          if-no-files-found: error

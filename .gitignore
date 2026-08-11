@@ -1,0 +1,7 @@
+work/
+models/
+vendor/tiger/
+.pkg/
+__pycache__/
+*.pyc
+.venv/

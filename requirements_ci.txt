@@ -1,0 +1,5 @@
+# GitHub Actions（Linux runner）专用：torch 单独装 CPU 版（见 workflow）
+soundfile>=0.12
+numpy>=1.26
+huggingface_hub>=0.26
+safetensors>=0.4
