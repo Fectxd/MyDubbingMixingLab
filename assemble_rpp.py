@@ -135,6 +135,11 @@ def load_master_report() -> dict[str, dict]:
     return {t["name"]: t for t in data.get("tracks", [])}
 
 
+def lua_str(s: str) -> str:
+    """Encode a string as a Lua string literal."""
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def write_dynamics_lua(out_path: Path, tracks: list[dict]) -> Path:
     """Write per-track compressor/limiter settings for scripts/apply_dynamics.lua."""
     dyn_path = out_path.with_name(DYNAMICS_LUA_NAME)
@@ -143,7 +148,10 @@ def write_dynamics_lua(out_path: Path, tracks: list[dict]) -> Path:
         "-- read by scripts/apply_dynamics.lua inside REAPER",
         "return {",
     ]
+    actors = []
     for t in tracks:
+        if t.get("kind") == "actor":
+            actors.append(lua_str(t["name"]))
         dyn = t.get("dynamics")
         if not dyn:
             continue
@@ -153,9 +161,12 @@ def write_dynamics_lua(out_path: Path, tracks: list[dict]) -> Path:
             fields.append(f"ratio={dyn['ratio']:.2f}")
             fields.append(f"attack={dyn['attack']:.0f}")
             fields.append(f"release={dyn['release']:.0f}")
+        if dyn.get("gain_db") is not None:
+            fields.append(f"gain_db={dyn['gain_db']:.2f}")
         fields.append(f"limiter_ceiling_db={dyn['limiter_ceiling_db']:.2f}")
-        key = t["name"].replace("\\", "\\\\").replace('"', '\\"')
-        lines.append(f"  [\"{key}\"] = {{ {', '.join(fields)} }},")
+        lines.append(f"  [{lua_str(t['name'])}] = {{ {', '.join(fields)} }},")
+    if actors:
+        lines.append(f"  actors = {{ {', '.join(actors)} }},")
     lines.append("}")
     dyn_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return dyn_path
@@ -209,6 +220,8 @@ def build_project(actor_files: list[Path], out_path: Path, mix_mode: str) -> dic
         dynamics = None
         if mix_mode == "raw" and entry is not None:
             dynamics = {"limiter_ceiling_db": float(entry.get("limiter_ceiling_db", -0.4))}
+            if entry.get("gain_db") is not None:
+                dynamics["gain_db"] = float(entry["gain_db"])
             if entry.get("threshold_db") is not None:
                 dynamics.update(
                     threshold_db=float(entry["threshold_db"]),
@@ -234,11 +247,13 @@ def build_project(actor_files: list[Path], out_path: Path, mix_mode: str) -> dic
         src = stems[name]
         duration, _, _, _ = probe_audio(src)
         track = Track(name=label)
+        # 4 channels so the dialogue-trigger sidechain can land on 3/4.
+        track.props.append(["I_NCHAN", "4"])
         project.add(track)
         track.add(Item(Source(file=str(src.resolve())), position=0.0, length=duration))
         manifest_tracks.append(
             {"kind": "background", "name": label, "source": str(src.resolve()),
-             "duration_s": round(duration, 3)}
+             "duration_s": round(duration, 3), "channels": 4}
         )
 
     dialog = stems["dialog"]
@@ -250,6 +265,19 @@ def build_project(actor_files: list[Path], out_path: Path, mix_mode: str) -> dic
     manifest_tracks.append(
         {"kind": "reference", "name": "参考-原片对白（静音）",
          "source": str(dialog.resolve()), "muted": True, "duration_s": round(duration, 3)}
+    )
+
+    # Grouped sidechain trigger bus: the 5 actor tracks feed it, and it feeds
+    # the background tracks' channels 3/4; ReaComp on the background tracks
+    # then ducks whenever any actor speaks.  Master send is off so the trigger
+    # itself is inaudible (scripts/apply_sidechain.lua wires the sends inside
+    # REAPER, keeping the .rpp simple and robust).
+    bus = Track(name="对白触发")
+    bus.props.append(["B_MAINSEND", "0"])
+    project.add(bus)
+    manifest_tracks.append(
+        {"kind": "trigger_bus", "name": "对白触发",
+         "muted_to_master": True, "note": "侧链触发总线（无声）"}
     )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -268,11 +296,13 @@ def verify_rpp(out_path: Path, expected_tracks: int, expected_volpan: int = 0) -
     text = out_path.read_text(encoding="utf-8")
     track_blocks = text.count("<TRACK")
     assert track_blocks == expected_tracks, f"expected {expected_tracks} TRACKs, got {track_blocks}"
-    assert text.count("<ITEM") == expected_tracks, "each track must have exactly one ITEM"
+    assert text.count("<ITEM") == expected_tracks - 1, "bus track has no ITEM; every other track exactly one"
     assert "SOURCE WAVE" in text and "POSITION 0.0" in text, "item layout unexpected"
     assert "SAMPLERATE 44100" in text, "project sample rate must be 44100"
     volpan = text.count("VOLPAN ")
     assert volpan == expected_volpan, f"expected {expected_volpan} VOLPAN lines, got {volpan}"
+    assert text.count("I_NCHAN 4") == 2, "both background tracks must have 4 channels"
+    assert "B_MAINSEND 0" in text, "trigger bus must not feed the master"
 
 
 def main() -> int:

@@ -107,8 +107,8 @@ def main() -> int:
     print("  修复  : work/enhanced/（如执行了 RE-USE）", flush=True)
     print("  分析  : work/mastered/master_report.json（各轨增益/压缩参数）", flush=True)
     print("  工程  : work/reaper/EP05_配音工程.rpp + manifest", flush=True)
-    print("  动态  : work/reaper/EP05_dynamics.lua（配合 scripts/apply_dynamics.lua "
-          "在 Reaper 里加 ReaComp + ReaLimit）", flush=True)
+    print("  动态  : work/reaper/EP05_dynamics.lua（在 Reaper 里跑 "
+          "scripts/apply_mix.lua 一键加 ReaComp + 增益补偿 + ReaLimit + 对白侧链）", flush=True)
     return 0
 
 

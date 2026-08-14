@@ -12,15 +12,16 @@
 ② enhance.py  可选：NVIDIA RE-USE 修复低质量干声（需要 GPU）
         │        输出 work/enhanced/
         ▼
-③ master.py  对照原片对白测每轨“说话电平 + 动态范围”，
-        │        输出 work/mastered/master_report.json（增益/压缩参数）
+③ master.py  对照原片对白测每轨“说话电平 + 动态范围”，低阈值压缩把
+        │        安静台词拉起来，输出 work/mastered/master_report.json（增益/压缩参数）
         ▼
 ④ assemble_rpp.py（默认 raw 非破坏式）
         │        5 条演员整轨(0 位) + 轨道音量响度对齐
-        │        + 音乐/音效背景轨 + 静音参考对白轨
+        │        + 音乐/音效背景轨(4 通道) + 静音参考对白轨 + 对白触发总线
         │        输出 work/reaper/EP05_配音工程.rpp + manifest + dynamics
         ▼
-⑤ Reaper 打开 .rpp → 跑 scripts/apply_dynamics.lua 加 ReaComp/ReaLimit
+⑤ Reaper 打开 .rpp → 跑 scripts/apply_mix.lua 一键加
+        压缩 + 增益补偿 + 限幅 + 对白触发侧链 ducking
 ```
 
 ## 安装
@@ -51,8 +52,10 @@ pip install --index-url https://download.pytorch.org/whl/cpu torch
    python master.py --actors test
    ```
    输出 `work/mastered/master_report.json`：每条轨的说话电平中位数、动态范围、
-   压缩阈值/比例、限幅阈值和增益。Adrian 那种“本身很大声”的轨会被压下来，
-   Chloe/Nina 这种动态已经很平顺的轨跳过压缩只做增益。
+   压缩阈值/比例、限幅阈值和增益。策略是“电平拉平”而不是只压峰值：
+   压缩阈值取在整段对白的较低分位（p15），中低比例（约 1.5~4:1），
+   压缩后再用增益补偿把整轨抬到参照轨的响度——这样安静台词会被一起拉起来，
+   Adrian 那种本身很大声的轨也不会再盖住别人。
 
 3. 生成 Reaper 工程（默认非破坏式 raw 模式）：
    ```bash
@@ -69,12 +72,19 @@ pip install --index-url https://download.pytorch.org/whl/cpu torch
    ```
    它优先引用 `work/mastered/` 的渲染结果。
 
-4. Reaper 里加压缩/限制器（非破坏式，可随时调）：
+4. Reaper 里一键加压缩/限制/侧链（非破坏式，可随时调）：
    打开 `work/reaper/EP05_配音工程.rpp` → Actions（默认 `?` 键）→
-   ReaScript: Load… → 选 `scripts/apply_dynamics.lua` → Run。
-   脚本按 `work/reaper/EP05_dynamics.lua` 里的参数给每条演员轨加
-   ReaComp（有压缩记录的轨）和 ReaLimit（-0.4 dB 天花板），之后直接在
-   Reaper 里拧参数即可。
+   ReaScript: Load… → 选 `scripts/apply_mix.lua` → Run。它会做三件事：
+   - 每条演员轨加 ReaComp（低阈值压缩）+ JS 增益补偿 + ReaLimit（-0.45 dB
+     天花板），并把轨道音量归 0 dB——响度补偿放进效果器链里，限幅器才真正
+     兜得住峰值（如果补偿在轨道音量上，会被限幅器之后再次抬过头）；
+   - 建立「对白触发」总线：5 条演员轨送进去，总线再送到背景音乐/音效的
+     3/4 通道，两条背景轨各加一个探测 Aux 输入的 ReaComp——只要有人开口，
+     背景自动让路，对白一停就恢复；
+   - 脚本可重复运行，不会重复插入效果器。之后直接在 Reaper 里拧参数即可。
+
+   想单独只加压缩/限制（不要侧链），跑 `scripts/apply_dynamics.lua`；
+   只想加侧链 ducking，跑 `scripts/apply_sidechain.lua`。
 
 5. Reaper 打开 `work/reaper/EP05_配音工程.rpp` 开始混音。
 
@@ -133,8 +143,9 @@ RE-USE 做降噪/去混响/带宽扩展/低质量麦克风修复。注意：
 
 ## 已知边界
 
-- 分离不是无损的，背景轨可能残留原片对白；正式混音时建议给背景做
-  sidechain ducking，或把静音参考对白轨临时打开来核对口型。
+- 分离不是无损的，背景轨可能残留原片对白；工程已内置对白触发侧链
+  （`scripts/apply_sidechain.lua` / `apply_mix.lua`），必要时也可把静音参考
+  对白轨临时打开来核对口型。
 - 本机是 Windows ARM64：没有 torchaudio 的 ARM 版，音频读写走 ffmpeg +
   soundfile，`separate.py` 不需要 torchaudio。
 - raw 模式下响度对齐在轨道音量上，压缩/限制靠 Reaper 原生 FX；如果
