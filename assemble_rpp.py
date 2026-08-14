@@ -26,6 +26,7 @@ DEFAULT_ACTOR_DIR = PROJECT_ROOT / "test"
 SEPARATED_DIR = PROJECT_ROOT / "work" / "separated"
 PROCESSED_DIR = PROJECT_ROOT / "work" / "processed"
 ENHANCED_DIR = PROJECT_ROOT / "work" / "enhanced"
+MASTERED_DIR = PROJECT_ROOT / "work" / "mastered"
 DEFAULT_OUT = PROJECT_ROOT / "work" / "reaper" / "EP05_配音工程.rpp"
 SAMPLE_RATE = 44100
 
@@ -159,9 +160,17 @@ def build_project(actor_files: list[Path], out_path: Path) -> dict:
     for file in actor_files:
         actor, role = parse_actor_role(file.stem)
         label = f"{actor} ({role})" if role else actor
+        mastered_path = MASTERED_DIR / f"{file.stem}.wav"
         enhanced_path = ENHANCED_DIR / f"{file.stem}.wav"
-        use_enhanced = enhanced_path.exists()
-        src, converted = normalize(enhanced_path if use_enhanced else file)
+        if mastered_path.exists():
+            src, converted = normalize(mastered_path)
+            flags = {"mastered": True, "enhanced": False}
+        elif enhanced_path.exists():
+            src, converted = normalize(enhanced_path)
+            flags = {"mastered": False, "enhanced": True}
+        else:
+            src, converted = normalize(file)
+            flags = {"mastered": False, "enhanced": False}
         duration, _, _, _ = probe_audio(src)
         track = Track(name=label)
         project.add(track)
@@ -177,7 +186,7 @@ def build_project(actor_files: list[Path], out_path: Path) -> dict:
                 "role": role,
                 "source": str(src.resolve()),
                 "converted": converted,
-                "enhanced": use_enhanced,
+                **flags,
                 "duration_s": round(duration, 3),
             }
         )
@@ -246,6 +255,8 @@ def main() -> int:
     print(f"tracks: {len(manifest['tracks'])}  manifest: {manifest_path}")
     for t in manifest["tracks"]:
         note = ""
+        if t.get("mastered"):
+            note += " (mastered: 压缩+响度对齐)"
         if t.get("enhanced"):
             note += " (RE-USE enhanced)"
         if t.get("converted"):

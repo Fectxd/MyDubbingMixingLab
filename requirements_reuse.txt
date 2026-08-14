@@ -7,6 +7,7 @@ causal-conv1d>=1.4.0
 einops>=0.7
 pyyaml>=6.0
 soundfile>=0.12
+pyloudnorm>=0.1
 huggingface_hub>=0.26
 safetensors>=0.4
 numpy>=1.26
