@@ -194,12 +194,27 @@ def main() -> int:
 
     results = {"reference": str(ref) if ref_stats is not None else None,
                "target_lufs": round(target_lufs, 2), "target_dr": round(target_dr, 1), "tracks": []}
+    report_path = outdir / "master_report.json"
+    prev_entries: dict[str, dict] = {}
+    if report_path.exists():
+        try:
+            prev_entries = {
+                t["name"]: t for t in json.loads(
+                    report_path.read_text(encoding="utf-8")
+                ).get("tracks", [])
+            }
+        except Exception:
+            prev_entries = {}
     for take in takes:
         src, kind = pick_source(take)
         out = outdir / f"{take.stem}.wav"
         if out.exists():
             print(f"     skip {take.name} (already mastered)", flush=True)
-            results["tracks"].append({"name": take.name, "status": "skipped"})
+            results["tracks"].append(
+                prev_entries.get(take.name)
+                or prev_entries.get(take.stem)
+                or {"name": take.name, "status": "skipped"}
+            )
             continue
         t0 = time.time()
         st = measure_stats(src)
@@ -255,9 +270,8 @@ def main() -> int:
               f"限幅 {'开' if not args.no_limiter else '关'}, 增益 {info['gain_db']:+.1f} dB "
               f"({time.time() - t0:.0f}s)", flush=True)
 
-    report = outdir / "master_report.json"
-    report.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"done. outputs in {outdir}  report: {report}", flush=True)
+    report_path.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"done. outputs in {outdir}  report: {report_path}", flush=True)
     keep_system_awake(False)
     return 0
 
