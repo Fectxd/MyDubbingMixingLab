@@ -1,4 +1,4 @@
-# 配音混音流水线：分离原片 → 响度/动态分析 → 排 Reaper 工程
+# 配音混音流水线：分离原片 → 响度/动态分析 → 排 Reaper 工程 → 合并成片
 
 把演员干声（已对好轨的整轨）和原片背景音一起排进 Reaper 工程做混音：
 
@@ -15,13 +15,19 @@
 ③ master.py  对照原片对白测每轨“说话电平 + 动态范围”，低阈值压缩把
         │        安静台词拉起来，输出 work/mastered/master_report.json（增益/压缩参数）
         ▼
-④ assemble_rpp.py（默认 raw 非破坏式）
-        │        5 条演员整轨(0 位) + 轨道音量响度对齐
+④ assemble_rpp.py（默认 files：引用 work/mastered 成品）
+        │        压缩 + 增益补偿 + 限幅已烧进 wav，打开工程就是混好的声音
         │        + 音乐/音效背景轨(4 通道) + 静音参考对白轨 + 对白触发总线
-        │        输出 work/reaper/EP05_配音工程.rpp + manifest + dynamics
+        │        输出 work/reaper/EP05_配音工程.rpp + manifest
         ▼
-⑤ Reaper 打开 .rpp → 跑 scripts/apply_mix.lua 一键加
-        压缩 + 增益补偿 + 限幅 + 对白触发侧链 ducking
+⑤ merge_video.py  混音（演员成品 + 音乐/音效）+ 原视频 → 成片
+        │        音频窗口取原音（背景轨）的时间范围，前导/尾随内容裁掉，
+        │        成片时长与视频严格一致
+        │        输出 work/final/EP05_配音成片.mp4
+        ▼
+⑥ Reaper 直接打开 .rpp 即可试听/微调轨道音量；
+         想要可调的效果器链（非破坏式）则用 --mix-mode raw 重新生成，
+         再跑 scripts/apply_mix.lua 一键加压缩 + 增益补偿 + 限幅 + 侧链 ducking
 ```
 
 ## 安装
@@ -57,22 +63,59 @@ pip install --index-url https://download.pytorch.org/whl/cpu torch
    压缩后再用增益补偿把整轨抬到参照轨的响度——这样安静台词会被一起拉起来，
    Adrian 那种本身很大声的轨也不会再盖住别人。
 
-3. 生成 Reaper 工程（默认非破坏式 raw 模式）：
+   对“动态损失”较大的录音（整条电平悬在高位、几乎没有安静段落，如手机/
+   直播麦录的 Adrian），策略是**连续的、全组相对的**而不是一刀切：每条轨
+   算一个 hotness 指数（安静地板相对全组中位数高多少 × 说话密度），越“热”
+   的轨压缩越轻（比例从 3.2:1 连续降到 1.3:1、阈值从 p15 向 p50 靠拢），
+   保住仅剩的动态；响度控制改由**音量**承担——presence trim 最多从目标响度
+   里扣掉 `--presence-trim-max`（默认 4.0）dB，再用参照轨 p85 做顶部锚点，
+   顶部仍然过热就继续转成音量衰减。全组都正常时 hotness≈0，退化为普通响度
+   匹配；多条轨异常时各自按自己的 hotness 调整。
+
+   已渲染过的轨默认跳过（沿用上次测量）；改了策略参数后要重测重渲染请加
+   `--force`：
+   ```bash
+   python master.py --actors test --force --presence-trim-max 4.0
+   ```
+
+3. 生成 Reaper 工程（默认 files 模式 = 自动调音量 + 压缩/限制已生效）：
    ```bash
    python assemble_rpp.py --actors test
    ```
-   直接引用 `work/enhanced/` 的干声（不转码、不写回），把响度对齐的增益写到
-   **轨道音量（VOLPAN）**，音乐、音效各占一条背景轨，分离出的对白作为静音
-   参考轨方便对位。48k/单声道之类的异格式源交给 Reaper 自己重采样，源文件
-   一个字节都不动。
+   5 条演员轨直接引用 `work/mastered/` 的渲染成品——`master.py` 算好的
+   **压缩（阈值/比例）+ 增益补偿 + 限幅（-0.45 dB）已经烧进 wav**，
+   打开工程听到的就是自动调整后的混音，任何机器声音都一样。
+   音乐、音效各占一条背景轨（4 通道），分离出的对白作为静音参考轨方便对位。
+   人声组整体电平默认 **+1 dB**（`--voice-gain-db` 调整，0 关闭），
+   files 模式写到轨道音量（VOLPAN），成片合并时用同一参数保持一致。
 
-   想要“确定性交付版”（压缩+限幅已渲染进 wav，任何机器打开声音都一样）：
+   工程始终输出到同一个文件 `work/reaper/EP05_配音工程.rpp`（重复运行会
+   直接覆盖，不会累积）。只有手动传 `--out` 才会生成带后缀的变体文件；
+   交付前请只保留要用的那一份，其余删除，避免 Reaper 里打开错文件。
+
+   想要"非破坏式、可在 Reaper 里随时拧参数"的效果器链（轨道音量对齐 +
+   手动加压缩/限幅/侧链），用 raw 模式：
    ```bash
-   python assemble_rpp.py --actors test --mix-mode files
+   python assemble_rpp.py --actors test --mix-mode raw
    ```
-   它优先引用 `work/mastered/` 的渲染结果。
+   它引用 `work/enhanced/` 的干声，把响度增益写到轨道音量（VOLPAN），
+   48k/单声道之类的异格式源交给 Reaper 自己重采样，源文件一个字节都不动。
 
-4. Reaper 里一键加压缩/限制/侧链（非破坏式，可随时调）：
+4. 合并成片（混音 + 原视频，时长严格一致）：
+   ```bash
+   python merge_video.py
+   ```
+   自动把 `work/mastered/` 的演员成品 + `work/separated/` 的音乐/音效按
+   0 dB 混成一条（与 files 模式工程听到的一致，静音参考轨和触发总线除外），
+   再与 `test/原片.mp4` 合并输出 `work/final/EP05_配音成片.mp4`。关键点：
+   **不按混音本身的长度裁头尾**，而是取原音（背景轨）的时间范围作为窗口
+   ——对轨导致的人声前导（人声轨靠前）和尾随多余时长会被一并裁掉，成片
+   时长与视频严格一致（视频流原样复制，音频转 AAC 48k 立体声）。
+   人声组增益默认与工程一致（读 manifest 的 `voice_gain_db`，+1 dB）；
+   想临时只改成片试听用 `--voice-gain-db 3`，定了之后用同值重跑 assemble
+   写入工程，两边保持一致。
+
+5. （仅 raw 模式）Reaper 里一键加压缩/限制/侧链（非破坏式，可随时调）：
    打开 `work/reaper/EP05_配音工程.rpp` → Actions（默认 `?` 键）→
    ReaScript: Load… → 选 `scripts/apply_mix.lua` → Run。它会做三件事：
    - 每条演员轨加 ReaComp（低阈值压缩）+ JS 增益补偿 + ReaLimit（-0.45 dB
@@ -86,7 +129,8 @@ pip install --index-url https://download.pytorch.org/whl/cpu torch
    想单独只加压缩/限制（不要侧链），跑 `scripts/apply_dynamics.lua`；
    只想加侧链 ducking，跑 `scripts/apply_sidechain.lua`。
 
-5. Reaper 打开 `work/reaper/EP05_配音工程.rpp` 开始混音。
+6. Reaper 打开 `work/reaper/EP05_配音工程.rpp` 开始混音；交付成片在
+   `work/final/EP05_配音成片.mp4`。
 
 ## 可选：逐句自动对轨（easyaligner）
 

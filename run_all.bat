@@ -43,7 +43,7 @@ if not "%VIDEO%"=="" (
 if errorlevel 1 goto :err
 
 echo.
-echo DONE. See work\separated\, work\enhanced\ and work\reaper\.
+echo DONE. See work\separated\, work\enhanced\, work\reaper\ and work\final\ (成片 mp4).
 pause
 exit /b 0
 

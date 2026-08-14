@@ -11,20 +11,34 @@ below the rest. Per take we:
      active speech loudness
   4. final alimiter catches any remaining peaks
 
+Continuous "dynamic-loss" policy (instead of a one-size-fits-all or a
+binary compress/no-compress rule): every take gets a hotness index in
+[0,1] measuring how much of its dynamics the recording already lost
+(elevated quiet floor + high speech density). The hotter a take is, the
+*less* compression/limiting it receives (ratio drops toward 1.3:1 and the
+threshold moves from p15 toward p50) so its remaining dynamics are not
+flattened further, and the louder-balance work shifts to *volume*: a
+presence trim subtracts up to --presence-trim-max dB from its gain, and a
+top anchor (reference p85) converts any residual top overshoot into extra
+volume reduction. The floor metric is ensemble-relative (median of all
+takes), so it works for any number of hot takes and degenerates to plain
+loudness matching when the whole cast is normal.
+
 The loudness gain is published in master_report.json; assemble_rpp.py (raw
 mode) applies it as a REAPER track-fader gain instead of touching the files,
 and scripts/apply_dynamics.lua recreates the same compressor settings inside
 REAPER (auto makeup off, fader does the lifting).
 
 Output goes to work/mastered/, used by assemble_rpp.py in preference to
-enhanced/original tracks. The loudness gain is also published in
-master_report.json, where assemble_rpp.py (raw mode) applies it as a REAPER
-track-fader gain instead of touching the files.
+enhanced/original tracks. Re-running skips already-mastered takes and
+reuses their previous measurement; pass --force to re-measure and re-render
+from the current sources.
 
 Usage:
     python master.py --actors test --reference work/separated/原片_dialog.wav
     python master.py --actors test --target-lufs -23 --target-dr 12
     python master.py --actors test --no-compress
+    python master.py --actors test --force --presence-trim-max 4.0
 """
 
 from __future__ import annotations
@@ -165,6 +179,11 @@ def main() -> int:
     parser.add_argument("--attack", type=float, default=15.0, help="attack ms")
     parser.add_argument("--release", type=float, default=200.0, help="release ms")
     parser.add_argument("--no-compress", action="store_true", help="skip compression entirely")
+    parser.add_argument("--force", action="store_true",
+                        help="re-measure and re-render takes that already have mastered output")
+    parser.add_argument("--presence-trim-max", type=float, default=4.0,
+                        help="max dB subtracted from the loudness target for fully "
+                             "'dynamic-lost' (hot/dense) takes, 0 disables (default: 4.0)")
     args = parser.parse_args()
 
     keep_system_awake(True)
@@ -193,7 +212,9 @@ def main() -> int:
     tmpdir.mkdir(parents=True, exist_ok=True)
 
     results = {"reference": str(ref) if ref_stats is not None else None,
-               "target_lufs": round(target_lufs, 2), "target_dr": round(target_dr, 1), "tracks": []}
+               "target_lufs": round(target_lufs, 2), "target_dr": round(target_dr, 1),
+               "target_p85_db": round(ref_stats["p85"], 1) if ref_stats is not None else None,
+               "tracks": []}
     report_path = outdir / "master_report.json"
     prev_entries: dict[str, dict] = {}
     if report_path.exists():
@@ -205,11 +226,25 @@ def main() -> int:
             }
         except Exception:
             prev_entries = {}
+
+    # --- pre-pass: measure every take's source so the ensemble medians are
+    # known before any processing. The "dynamic-loss" floor metric is relative
+    # to the whole cast (not a fixed threshold), so it works whether zero,
+    # one, or several takes are hot, and degenerates to plain loudness
+    # matching when the whole cast is normal.
+    pre: list[dict] = []
     for take in takes:
         src, kind = pick_source(take)
+        pre.append({"take": take, "src": src, "kind": kind, "st": measure_stats(src)})
+    med_p15 = float(np.median([x["st"]["p15"] for x in pre]))
+    results["med_p15_db"] = round(med_p15, 1)
+    print(f"全组安静地板中位数 p15 = {med_p15:.1f} dB（高于它的轨视为'动态损失'）", flush=True)
+
+    for item in pre:
+        take, src, kind, st = item["take"], item["src"], item["kind"], item["st"]
         out = outdir / f"{take.stem}.wav"
-        if out.exists():
-            print(f"     skip {take.name} (already mastered)", flush=True)
+        if out.exists() and not args.force:
+            print(f"     skip {take.name} (already mastered; 沿用上次测量，--force 可重测重渲染)", flush=True)
             results["tracks"].append(
                 prev_entries.get(take.name)
                 or prev_entries.get(take.stem)
@@ -217,27 +252,45 @@ def main() -> int:
             )
             continue
         t0 = time.time()
-        st = measure_stats(src)
         tmp = tmpdir / f"c_{take.stem}.wav"
+
+        # --- continuous dynamic-loss index (0 = normal dynamics, 1 = fully
+        # lost): elevated quiet floor vs the cast median, amplified by speech
+        # density. Hotter take -> gentler compressor (ratio -> 1.3:1,
+        # threshold drifts from p15 toward p50) and more volume-based balance.
+        floor_term = min(1.0, max(0.0, (st["p15"] - med_p15) / 12.0))
+        density_norm = min(1.0, max(0.0, (st["density"] - 0.05) / 0.30))
+        hotness = min(1.0, floor_term * (1.0 + 0.5 * density_norm))
+
         compress_info = {}
         if args.no_compress:
             run_ffmpeg(["-i", str(src), "-c:a", "pcm_s16le", str(tmp)])
             compress_info["compressed"] = False
         else:
-            # Low threshold (~p15 of speech blocks) catches quiet phrases;
-            # the loudness-match gain applied afterwards lifts everything,
-            # so the quiet-loud gap shrinks instead of only shaving peaks.
-            threshold_db = max(-48.0, min(-12.0, st["p15"]))
+            threshold_db = st["p15"] + hotness * (st["p50"] - st["p15"])
+            threshold_db = max(-48.0, min(-12.0, threshold_db))
             threshold = float(10 ** (threshold_db / 20.0))
-            ratio = args.ratio if args.ratio is not None else min(
-                4.0, max(1.5, 1.0 + (st["dr"] - 8.0) / 8.0)
+            ratio = args.ratio if args.ratio is not None else round(
+                3.2 - 1.9 * hotness, 2
             )
             compress(src, tmp, threshold, ratio, args.attack, args.release)
             compress_info = {"compressed": True, "threshold": round(threshold, 4),
                              "threshold_db": round(threshold_db, 1), "ratio": round(ratio, 2),
                              "attack": round(args.attack, 1), "release": round(args.release, 1)}
+
         measured = measure_stats(tmp)
-        gain = target_lufs - measured["speech_lufs"]
+        # Volume-based balance (compression is deliberately *not* the tool for
+        # hot/dense takes): a presence trim for dynamic-lost takes, then a top
+        # anchor that converts any residual top overshoot into extra level cut.
+        presence_trim = hotness * max(0.0, args.presence_trim_max)
+        gain = (target_lufs - measured["speech_lufs"]) - presence_trim
+        top_overshoot = 0.0
+        if ref_stats is not None:
+            expected_top = measured["p85"] + gain
+            overshoot = expected_top - ref_stats["p85"]
+            if overshoot > 0.0:
+                top_overshoot = min(3.0, overshoot)
+                gain -= top_overshoot
         info = apply_gain_and_save(tmp, out, gain)
         if not args.no_limiter:
             lim_tmp = tmpdir / f"l_{take.stem}.wav"
@@ -259,16 +312,19 @@ def main() -> int:
             "measured_dr": round(st["dr"], 1), "target_dr": round(target_dr, 1),
             "measured_p15_db": round(st["p15"], 1), "measured_p50_db": round(st["p50"], 1),
             "measured_p85_db": round(st["p85"], 1),
+            "hotness": round(hotness, 3),
+            "presence_trim_db": round(presence_trim, 2),
+            "top_overshoot_db": round(top_overshoot, 2),
             **compress_info, "measured_lufs": round(measured["speech_lufs"], 2), **info,
             "final_dr": round(final["dr"], 1), "final_lufs": round(final["speech_lufs"], 2),
             "final_speech_median_db": round(final["p50"], 1),
         })
-        tag = f"压缩 {compress_info['ratio']:.1f}:1 (threshold {compress_info['threshold_db']:.0f} dB)" \
+        tag = f"压缩 {compress_info['ratio']:.1f}:1 (threshold {compress_info['threshold_db']:.0f} dB, hotness {hotness:.2f})" \
             if compress_info.get("compressed") else "不压缩"
         print(f"     {take.name}: {tag}, "
               f"DR {st['dr']:.1f}->{final['dr']:.1f} dB, "
               f"限幅 {'开' if not args.no_limiter else '关'}, 增益 {info['gain_db']:+.1f} dB "
-              f"({time.time() - t0:.0f}s)", flush=True)
+              f"(含 presence {presence_trim:+.1f} dB) ({time.time() - t0:.0f}s)", flush=True)
 
     report_path.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"done. outputs in {outdir}  report: {report_path}", flush=True)

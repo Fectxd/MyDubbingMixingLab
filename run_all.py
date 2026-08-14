@@ -3,7 +3,8 @@
 Steps: ① separate the picture (TIGER-DnR) -> ② enhance dry takes (NVIDIA
 RE-USE, skipped with a note if mamba-ssm is unavailable) -> ③ analyse
 loudness/dynamics against the original dialogue (master.py) -> ④ assemble
-the Reaper project (non-destructive raw mode).
+the Reaper project (files mode: mastered wavs) -> ⑤ merge the mix with the
+original video (audio cut to the original-audio window = video duration).
 
 Usage:
     python run_all.py
@@ -100,15 +101,18 @@ def main() -> int:
     run("③ 响度/动态分析 (master.py，参数写入 master_report.json)",
         ["master.py", "--actors", *[str(f) for f in actors]])
 
-    run("④ 排 Reaper 工程 (非破坏式 raw 模式)", ["assemble_rpp.py", "--actors", *[str(f) for f in actors]])
+    run("④ 排 Reaper 工程 (默认 files 模式：引用 mastered 成品)",
+        ["assemble_rpp.py", "--actors", *[str(f) for f in actors]])
+
+    run("⑤ 合并成片 (混音 + 原视频，音频取原音窗口、与视频等长)",
+        ["merge_video.py", "--video", str(video)])
 
     print("\n全部完成！产物：", flush=True)
     print("  分离  : work/separated/（对白/音效/音乐 + 参考混音 + report）", flush=True)
     print("  修复  : work/enhanced/（如执行了 RE-USE）", flush=True)
     print("  分析  : work/mastered/master_report.json（各轨增益/压缩参数）", flush=True)
     print("  工程  : work/reaper/EP05_配音工程.rpp + manifest", flush=True)
-    print("  动态  : work/reaper/EP05_dynamics.lua（在 Reaper 里跑 "
-          "scripts/apply_mix.lua 一键加 ReaComp + 增益补偿 + ReaLimit + 对白侧链）", flush=True)
+    print("  成片  : work/final/EP05_配音成片.mp4（混音 + 原视频，音频与视频等长）", flush=True)
     return 0
 
 

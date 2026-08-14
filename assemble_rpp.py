@@ -7,12 +7,14 @@ separated dialogue as a muted QC reference track.
 
 Two mix modes:
 
-* ``raw`` (default, non-destructive): reference the enhanced/original dry
-  takes directly and put the loudness match from ``master_report.json`` on
-  the track fader (VOLPAN). No audio file is touched; compression/limiting
-  can be added inside REAPER with ``scripts/apply_dynamics.lua``.
-* ``files`` (deterministic): reference the rendered ``work/mastered/`` wavs
-  (compression + limiter + loudness already baked by ``master.py``).
+* ``files`` (default, deterministic): reference the rendered ``work/mastered/``
+  wavs — compression + limiter + loudness already baked by ``master.py`` — so
+  opening the project already plays the auto-leveled mix (volume alignment,
+  compression and limiting are in the audio itself).
+* ``raw`` (non-destructive): reference the enhanced/original dry takes and put
+  the loudness match from ``master_report.json`` on the track fader (VOLPAN).
+  No audio file is touched; compression/limiting can be added inside REAPER
+  with ``scripts/apply_dynamics.lua``.
 
 Neither mode converts or rewrites audio files: sample-rate and channel
 differences are left to REAPER's own resampling, so sources stay untouched.
@@ -20,16 +22,21 @@ differences are left to REAPER's own resampling, so sources stay untouched.
 Usage:
     python assemble_rpp.py --actors test
     python assemble_rpp.py --actors "test/5*.wav" --out work/reaper/EP05_配音工程.rpp
-    python assemble_rpp.py --actors test --mix-mode files
+    python assemble_rpp.py --actors test --mix-mode raw
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import subprocess
 from pathlib import Path
+
+import numpy as np
+import pyloudnorm as pyln
+import soundfile as sf
 
 from reathon.nodes import Item, Project, Source, Track
 
@@ -43,6 +50,44 @@ MASTER_REPORT = MASTERED_DIR / "master_report.json"
 DEFAULT_OUT = PROJECT_ROOT / "work" / "reaper" / "EP05_配音工程.rpp"
 SAMPLE_RATE = 44100
 DYNAMICS_LUA_NAME = "EP05_dynamics.lua"
+# 背景自动锚定：音乐平均响度压在对白下 --music-under-db，音效峰值压在对白
+# 峰值下 --effect-peak-under-db（音效多为瞬态，用峰值锚定而不是平均响度）。
+DEFAULT_MUSIC_UNDER_DB = 8.0
+DEFAULT_EFFECT_PEAK_UNDER_DB = 3.0
+BG_GAIN_CLAMP = (-12.0, 6.0)
+
+
+def measure_levels(path: Path) -> tuple[float, float]:
+    """Full-file integrated loudness (LUFS) and peak (dBFS) of a wav."""
+    data, rate = sf.read(str(path), always_2d=True, dtype="float32")
+    mono = data.mean(axis=1)
+    lufs = float(pyln.Meter(rate).integrated_loudness(mono))
+    peak = 20.0 * math.log10(float(np.max(np.abs(mono))) + 1e-12)
+    return lufs, peak
+
+
+def anchor_background_gains(dialog: Path, stems: dict[str, Path],
+                            music_under_db: float,
+                            effect_peak_under_db: float) -> dict[str, float]:
+    """Auto-balance music/effect under the dialogue.
+
+    music_gain makes the music bed sit ``music_under_db`` under the dialogue's
+    average loudness; effect_gain makes the effect stem's PEAK sit
+    ``effect_peak_under_db`` under the dialogue's peak (effects are transient-
+    heavy, so anchoring their average would still leave loud hits punching
+    above the dialogue). Gains are clamped to BG_GAIN_CLAMP and never boosted
+    beyond +6 dB.
+    """
+    d_lufs, d_peak = measure_levels(dialog)
+    m_lufs, _ = measure_levels(stems["music"])
+    _, e_peak = measure_levels(stems["effect"])
+    music_gain = (d_lufs - music_under_db) - m_lufs
+    effect_gain = (d_peak - effect_peak_under_db) - e_peak
+    lo, hi = BG_GAIN_CLAMP
+    return {
+        "music": round(min(hi, max(lo, music_gain)), 2),
+        "effect": round(min(hi, max(lo, effect_gain)), 2),
+    }
 
 
 def ffprobe_json(path: Path) -> dict:
@@ -172,7 +217,10 @@ def write_dynamics_lua(out_path: Path, tracks: list[dict]) -> Path:
     return dyn_path
 
 
-def build_project(actor_files: list[Path], out_path: Path, mix_mode: str) -> dict:
+def build_project(actor_files: list[Path], out_path: Path, mix_mode: str,
+                  voice_gain_db: float = 1.0,
+                  music_under_db: float = DEFAULT_MUSIC_UNDER_DB,
+                  effect_peak_under_db: float = DEFAULT_EFFECT_PEAK_UNDER_DB) -> dict:
     stems = find_stems(SEPARATED_DIR)
     missing = [str(p) for p in stems.values() if not p.exists()]
     if missing:
@@ -200,13 +248,16 @@ def build_project(actor_files: list[Path], out_path: Path, mix_mode: str) -> dic
             else:
                 src = file
                 flags = {"mastered": False, "enhanced": False}
-            gain = None
+            # 人声组整体增益：统一加到轨道音量（VOLPAN），成片用同参数保持一致
+            gain = voice_gain_db if voice_gain_db else None
+            voice_gain = gain
         else:
             # Non-destructive: reference the take as-is (REAPER resamples
             # 48k and handles mono sources natively), loudness on the fader.
             src = enhanced_path if enhanced_path.exists() else file
             flags = {"mastered": False, "enhanced": enhanced_path.exists()}
             gain = float(entry["gain_db"]) if entry and "gain_db" in entry else None
+            voice_gain = None
         duration, _, _, _ = probe_audio(src)
         track = Track(name=label)
         if gain is not None:
@@ -236,35 +287,50 @@ def build_project(actor_files: list[Path], out_path: Path, mix_mode: str) -> dic
                 "actor": actor,
                 "role": role,
                 "source": str(src.resolve()),
-                "volume_gain_db": gain,
+                "position": 0.0,
+                "volume_gain_db": gain if mix_mode == "raw" else None,
+                "voice_gain_db": voice_gain,
                 "dynamics": dynamics,
                 **flags,
                 "duration_s": round(duration, 3),
             }
         )
 
+    # 背景自动锚定：音乐/音效压在对白之下（见 anchor_background_gains）
+    bg_gains = anchor_background_gains(stems["dialog"], stems,
+                                       music_under_db, effect_peak_under_db)
     for label, name in (("背景-音乐", "music"), ("背景-音效", "effect")):
         src = stems[name]
         duration, _, _, _ = probe_audio(src)
         track = Track(name=label)
         # 4 channels so the dialogue-trigger sidechain can land on 3/4.
-        track.props.append(["I_NCHAN", "4"])
+        # Standard REAPER token is "NCHAN" ("I_NCHAN" is not recognized).
+        track.props.append(["NCHAN", "4"])
+        g = bg_gains[name]
+        if g:
+            track.props.append(["VOLPAN", f"{10 ** (g / 20.0):.4f} 0"])
         project.add(track)
         track.add(Item(Source(file=str(src.resolve())), position=0.0, length=duration))
         manifest_tracks.append(
             {"kind": "background", "name": label, "source": str(src.resolve()),
-             "duration_s": round(duration, 3), "channels": 4}
+             "position": 0.0, "duration_s": round(duration, 3), "channels": 4,
+             "gain_db": g}
         )
 
     dialog = stems["dialog"]
     duration, _, _, _ = probe_audio(dialog)
     ref_track = Track(name="参考-原片对白（静音）")
-    ref_track.props.append(["MUTE", "1 <1"])
     project.add(ref_track)
-    ref_track.add(Item(Source(file=str(dialog.resolve())), position=0.0, length=duration))
+    ref_item = Item(Source(file=str(dialog.resolve())), position=0.0, length=duration)
+    # Track-level "MUTE" is not a valid chunk token in modern REAPER (it only
+    # parses inside <ITEM>). Item mute is: MUTE <muted> <automation-state>,
+    # so "1 0" = muted without automation — matches what REAPER itself writes.
+    ref_item.props.append(["MUTE", "1 0"])
+    ref_track.add(ref_item)
     manifest_tracks.append(
         {"kind": "reference", "name": "参考-原片对白（静音）",
-         "source": str(dialog.resolve()), "muted": True, "duration_s": round(duration, 3)}
+         "source": str(dialog.resolve()), "muted": True, "position": 0.0,
+         "duration_s": round(duration, 3)}
     )
 
     # Grouped sidechain trigger bus: the 5 actor tracks feed it, and it feeds
@@ -273,7 +339,9 @@ def build_project(actor_files: list[Path], out_path: Path, mix_mode: str) -> dic
     # itself is inaudible (scripts/apply_sidechain.lua wires the sends inside
     # REAPER, keeping the .rpp simple and robust).
     bus = Track(name="对白触发")
-    bus.props.append(["B_MAINSEND", "0"])
+    # MAINSEND <send> <automation-state>; "0 0" = no send to master.
+    # "B_MAINSEND" is a legacy token modern REAPER no longer recognizes.
+    bus.props.append(["MAINSEND", "0 0"])
     project.add(bus)
     manifest_tracks.append(
         {"kind": "trigger_bus", "name": "对白触发",
@@ -301,8 +369,11 @@ def verify_rpp(out_path: Path, expected_tracks: int, expected_volpan: int = 0) -
     assert "SAMPLERATE 44100" in text, "project sample rate must be 44100"
     volpan = text.count("VOLPAN ")
     assert volpan == expected_volpan, f"expected {expected_volpan} VOLPAN lines, got {volpan}"
-    assert text.count("I_NCHAN 4") == 2, "both background tracks must have 4 channels"
-    assert "B_MAINSEND 0" in text, "trigger bus must not feed the master"
+    assert text.count("NCHAN 4") == 2, "both background tracks must have 4 channels"
+    assert text.count("MUTE 1 0") == 1, "reference dialogue item must be muted"
+    assert "MAINSEND 0 0" in text, "trigger bus must not feed the master"
+    for bad in ("I_NCHAN", "B_MAINSEND", "MUTE 1 <1"):
+        assert bad not in text, f"legacy/invalid token {bad!r} must not be emitted"
 
 
 def main() -> int:
@@ -310,10 +381,18 @@ def main() -> int:
     parser.add_argument("--actors", nargs="+", default=[str(DEFAULT_ACTOR_DIR)],
                         help="actor dir or explicit .wav files")
     parser.add_argument("--out", default=str(DEFAULT_OUT))
-    parser.add_argument("--mix-mode", choices=["files", "raw"], default="raw",
-                        help="raw: enhanced/original takes + track-volume gains, "
-                             "compression via apply_dynamics.lua (default, non-destructive); "
-                             "files: use rendered mastered wavs (deterministic)")
+    parser.add_argument("--mix-mode", choices=["files", "raw"], default="files",
+                        help="files: use rendered mastered wavs (compression + "
+                             "limiter + loudness baked, deterministic, default); "
+                             "raw: enhanced/original takes + track-volume gains, "
+                             "compression via apply_dynamics.lua (adjustable)")
+    parser.add_argument("--voice-gain-db", type=float, default=1.0,
+                        help="人声组整体增益 dB（files 模式写到轨道音量，成片用 "
+                             "merge_video.py 同参数保持一致；0 关闭，默认 1.0）")
+    parser.add_argument("--music-under-db", type=float, default=DEFAULT_MUSIC_UNDER_DB,
+                        help="音乐平均响度压在对白下多少 dB（默认 8，越温和设越小）")
+    parser.add_argument("--effect-peak-under-db", type=float, default=DEFAULT_EFFECT_PEAK_UNDER_DB,
+                        help="音效峰值压在对白峰值下多少 dB（默认 3，越温和设越小）")
     args = parser.parse_args()
 
     files: list[Path] = []
@@ -325,9 +404,14 @@ def main() -> int:
             files.append(p)
     files = sorted(set(files), key=lambda p: p.name.lower())
 
-    manifest = build_project(files, Path(args.out), args.mix_mode)
+    manifest = build_project(files, Path(args.out), args.mix_mode,
+                             voice_gain_db=args.voice_gain_db,
+                             music_under_db=args.music_under_db,
+                             effect_peak_under_db=args.effect_peak_under_db)
     expected_volpan = sum(
-        1 for t in manifest["tracks"] if t.get("volume_gain_db") is not None
+        1 for t in manifest["tracks"]
+        if t.get("volume_gain_db") is not None or t.get("voice_gain_db") is not None
+        or t.get("gain_db")
     )
     verify_rpp(Path(args.out), expected_tracks=len(manifest["tracks"]),
                expected_volpan=expected_volpan)
@@ -347,6 +431,8 @@ def main() -> int:
             note += " (mastered: 压缩+响度对齐已渲染)"
         if t.get("enhanced"):
             note += " (RE-USE enhanced)"
+        if t.get("voice_gain_db") is not None:
+            note += f" (人声组 {t['voice_gain_db']:+.1f} dB)"
         if t.get("volume_gain_db") is not None:
             note += f" (轨道音量 {t['volume_gain_db']:+.1f} dB)"
         if t.get("dynamics"):
