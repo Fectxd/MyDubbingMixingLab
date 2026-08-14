@@ -12,7 +12,9 @@ compressor is wrong for both. So per take we:
      active speech loudness
 
 Output goes to work/mastered/, used by assemble_rpp.py in preference to
-enhanced/original tracks.
+enhanced/original tracks. The loudness gain is also published in
+master_report.json, where assemble_rpp.py (raw mode) applies it as a REAPER
+track-fader gain instead of touching the files.
 
 Usage:
     python master.py --actors test --reference work/separated/原片_dialog.wav
@@ -151,6 +153,8 @@ def main() -> int:
     parser.add_argument("--outdir", default=str(PROJECT_ROOT / "work" / "mastered"))
     parser.add_argument("--ratio", type=float, default=None, help="override adaptive ratio")
     parser.add_argument("--threshold", type=float, default=None, help="override compressor threshold (linear)")
+    parser.add_argument("--limiter-limit", type=float, default=0.95, help="limiter ceiling (linear, 0.95 = -0.4 dBFS)")
+    parser.add_argument("--no-limiter", action="store_true", help="skip the final limiter")
     parser.add_argument("--attack", type=float, default=5.0, help="attack ms")
     parser.add_argument("--release", type=float, default=120.0, help="release ms")
     parser.add_argument("--no-compress", action="store_true", help="skip compression entirely")
@@ -210,6 +214,19 @@ def main() -> int:
         measured = measure_stats(tmp)
         gain = target_lufs - measured["speech_lufs"]
         info = apply_gain_and_save(tmp, out, gain)
+        if not args.no_limiter:
+            lim_tmp = tmpdir / f"l_{take.stem}.wav"
+            run_ffmpeg(
+                [
+                    "-i", str(out),
+                    "-af", f"alimiter=limit={args.limiter_limit}:level=false:attack=5:release=50",
+                    "-c:a", "pcm_s16le",
+                    str(lim_tmp),
+                ]
+            )
+            lim_tmp.replace(out)
+            info["limiter"] = "alimiter"
+            info["limiter_ceiling_db"] = round(20.0 * np.log10(args.limiter_limit), 2)
         final = measure_stats(out)
         tmp.unlink(missing_ok=True)
         results["tracks"].append({
@@ -220,11 +237,15 @@ def main() -> int:
             "final_speech_median_db": round(final["p50"], 1),
         })
         if compress_info.get("compressed"):
-            print(f"     {take.name}: DR {st['dr']:.1f}->{final['dr']:.1f} dB, "
-                  f"threshold {compress_info['threshold_db']:.0f} dB, ratio {compress_info['ratio']:.1f}:1, "
-                  f"增益 {info['gain_db']:+.1f} dB ({time.time() - t0:.0f}s)", flush=True)
+            print(f"     {take.name}: 压缩 {compress_info['ratio']:.1f}:1 "
+                  f"(threshold {compress_info['threshold_db']:.0f} dB), "
+                  f"DR {st['dr']:.1f}->{final['dr']:.1f} dB, "
+                  f"限幅 {'开' if not args.no_limiter else '关'}, 增益 {info['gain_db']:+.1f} dB "
+                  f"({time.time() - t0:.0f}s)", flush=True)
         else:
-            print(f"     {take.name}: DR {st['dr']:.1f} dB (不压缩), 增益 {info['gain_db']:+.1f} dB "
+            print(f"     {take.name}: {compress_info.get('reason', '不压缩')}, "
+                  f"DR {st['dr']:.1f}->{final['dr']:.1f} dB, "
+                  f"限幅 {'开' if not args.no_limiter else '关'}, 增益 {info['gain_db']:+.1f} dB "
                   f"({time.time() - t0:.0f}s)", flush=True)
 
     report = outdir / "master_report.json"

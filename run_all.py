@@ -1,8 +1,9 @@
 """Run the whole dubbing pipeline on one machine.
 
 Steps: ① separate the picture (TIGER-DnR) -> ② enhance dry takes (NVIDIA
-RE-USE, skipped with a note if mamba-ssm is unavailable) -> ③ assemble the
-Reaper project.
+RE-USE, skipped with a note if mamba-ssm is unavailable) -> ③ analyse
+loudness/dynamics against the original dialogue (master.py) -> ④ assemble
+the Reaper project (non-destructive raw mode).
 
 Usage:
     python run_all.py
@@ -96,12 +97,18 @@ def main() -> int:
     else:
         print("\n===== ② 修复干声 已按 --skip-enhance 跳过 =====", flush=True)
 
-    run("③ 排 Reaper 工程", ["assemble_rpp.py", "--actors", *[str(f) for f in actors]])
+    run("③ 响度/动态分析 (master.py，参数写入 master_report.json)",
+        ["master.py", "--actors", *[str(f) for f in actors]])
+
+    run("④ 排 Reaper 工程 (非破坏式 raw 模式)", ["assemble_rpp.py", "--actors", *[str(f) for f in actors]])
 
     print("\n全部完成！产物：", flush=True)
     print("  分离  : work/separated/（对白/音效/音乐 + 参考混音 + report）", flush=True)
     print("  修复  : work/enhanced/（如执行了 RE-USE）", flush=True)
+    print("  分析  : work/mastered/master_report.json（各轨增益/压缩参数）", flush=True)
     print("  工程  : work/reaper/EP05_配音工程.rpp + manifest", flush=True)
+    print("  动态  : work/reaper/EP05_dynamics.lua（配合 scripts/apply_dynamics.lua "
+          "在 Reaper 里加 ReaComp + ReaLimit）", flush=True)
     return 0
 
 

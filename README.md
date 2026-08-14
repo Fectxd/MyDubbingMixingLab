@@ -1,4 +1,4 @@
-# 配音混音流水线：分离原片 → 排 Reaper 工程
+# 配音混音流水线：分离原片 → 响度/动态分析 → 排 Reaper 工程
 
 把演员干声（已对好轨的整轨）和原片背景音一起排进 Reaper 工程做混音：
 
@@ -9,10 +9,18 @@
 ① separate.py  ffmpeg 解音(44.1k/立体声) → TIGER-DnR 分离
         │        输出 work/separated/：对白 / 音效 / 音乐 + 参考混音 + report.json
         ▼
-② assemble_rpp.py  5 条演员整轨(0 位) + 音乐/音效背景轨 + 静音参考对白轨
-        │        输出 work/reaper/EP05_配音工程.rpp + manifest.json
+② enhance.py  可选：NVIDIA RE-USE 修复低质量干声（需要 GPU）
+        │        输出 work/enhanced/
         ▼
-③ 用 Reaper 打开 .rpp 直接混音
+③ master.py  对照原片对白测每轨“说话电平 + 动态范围”，
+        │        输出 work/mastered/master_report.json（增益/压缩参数）
+        ▼
+④ assemble_rpp.py（默认 raw 非破坏式）
+        │        5 条演员整轨(0 位) + 轨道音量响度对齐
+        │        + 音乐/音效背景轨 + 静音参考对白轨
+        │        输出 work/reaper/EP05_配音工程.rpp + manifest + dynamics
+        ▼
+⑤ Reaper 打开 .rpp → 跑 scripts/apply_dynamics.lua 加 ReaComp/ReaLimit
 ```
 
 ## 安装
@@ -38,15 +46,37 @@ pip install --index-url https://download.pytorch.org/whl/cpu torch
    输出在 `work/separated/`。CPU 上 114 秒原片大约要跑 30~60 分钟，
    脚本会按 12 秒分块打印进度（对白/音效/音乐 第 i/N 段）。
 
-2. 生成 Reaper 工程：
+2. 响度/动态分析（对照原片对白轨）：
+   ```bash
+   python master.py --actors test
+   ```
+   输出 `work/mastered/master_report.json`：每条轨的说话电平中位数、动态范围、
+   压缩阈值/比例、限幅阈值和增益。Adrian 那种“本身很大声”的轨会被压下来，
+   Chloe/Nina 这种动态已经很平顺的轨跳过压缩只做增益。
+
+3. 生成 Reaper 工程（默认非破坏式 raw 模式）：
    ```bash
    python assemble_rpp.py --actors test
    ```
-   自动把 `test/` 下所有 wav 当作演员整轨，48k/单声道之类的异格式轨会
-   先转成 44.1k/16bit/立体声（存 `work/processed/`），其余原样引用；
-   音乐、音效各占一条背景轨，分离出的对白作为静音参考轨方便对位。
+   直接引用 `work/enhanced/` 的干声（不转码、不写回），把响度对齐的增益写到
+   **轨道音量（VOLPAN）**，音乐、音效各占一条背景轨，分离出的对白作为静音
+   参考轨方便对位。48k/单声道之类的异格式源交给 Reaper 自己重采样，源文件
+   一个字节都不动。
 
-3. Reaper 打开 `work/reaper/EP05_配音工程.rpp` 开始混音。
+   想要“确定性交付版”（压缩+限幅已渲染进 wav，任何机器打开声音都一样）：
+   ```bash
+   python assemble_rpp.py --actors test --mix-mode files
+   ```
+   它优先引用 `work/mastered/` 的渲染结果。
+
+4. Reaper 里加压缩/限制器（非破坏式，可随时调）：
+   打开 `work/reaper/EP05_配音工程.rpp` → Actions（默认 `?` 键）→
+   ReaScript: Load… → 选 `scripts/apply_dynamics.lua` → Run。
+   脚本按 `work/reaper/EP05_dynamics.lua` 里的参数给每条演员轨加
+   ReaComp（有压缩记录的轨）和 ReaLimit（-0.4 dB 天花板），之后直接在
+   Reaper 里拧参数即可。
+
+5. Reaper 打开 `work/reaper/EP05_配音工程.rpp` 开始混音。
 
 ## 可选：逐句自动对轨（easyaligner）
 
@@ -107,4 +137,6 @@ RE-USE 做降噪/去混响/带宽扩展/低质量麦克风修复。注意：
   sidechain ducking，或把静音参考对白轨临时打开来核对口型。
 - 本机是 Windows ARM64：没有 torchaudio 的 ARM 版，音频读写走 ffmpeg +
   soundfile，`separate.py` 不需要 torchaudio。
-- 本次排工程不做响度统一；后续可接入 pyloudnorm 逐轨对齐响度。
+- raw 模式下响度对齐在轨道音量上，压缩/限制靠 Reaper 原生 FX；如果
+  想要离线渲染的最终版（比如要交付混音），用 `--mix-mode files` 或直接
+  在 Reaper 里 File → Render。

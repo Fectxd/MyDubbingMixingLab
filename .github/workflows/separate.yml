@@ -36,11 +36,20 @@ jobs:
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
           python -m pip install -r requirements_ci.txt
 
+      - name: 校验 apply_dynamics.lua 语法
+        run: |
+          sudo apt-get install -y lua5.4
+          luac5.4 -p scripts/apply_dynamics.lua
+
       - name: 运行分离（防休眠在云端不需要，脚本自动忽略）
         run: |
           python separate.py --input "${{ inputs.input }}" --chunk ${{ inputs.chunk }} --device auto
 
-      - name: 排 Reaper 工程
+      - name: 响度/动态分析（对照原片对白）
+        run: |
+          python master.py --actors test
+
+      - name: 排 Reaper 工程（非破坏式：响度在轨道音量，压缩参数写 dynamics）
         run: |
           python assemble_rpp.py --actors test
 
@@ -53,4 +62,5 @@ jobs:
             work/separated/*.json
             work/reaper/*.rpp
             work/reaper/*.json
+            work/reaper/*.lua
           if-no-files-found: error
