@@ -91,30 +91,31 @@ def normalize(path: Path) -> tuple[Path, bool]:
     if sr == SAMPLE_RATE and channels == 2:
         return path, False
     out = PROCESSED_DIR / f"{path.stem}.wav"
-    if not out.exists():
-        PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-        proc = subprocess.run(
-            [
-                "ffmpeg",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                "-i",
-                str(path),
-                "-ac",
-                "2",
-                "-ar",
-                str(SAMPLE_RATE),
-                "-sample_fmt",
-                "s16",
-                str(out),
-            ],
-            capture_output=True,
-            text=True,
-        )
-        if proc.returncode != 0:
-            raise RuntimeError(f"ffmpeg conversion failed on {path}:\n{proc.stderr}")
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    # Always reconvert (stale-cache bug) and never use ffmpeg's implicit
+    # mono->stereo matrix (it applies -3 dB); duplicate the channel explicitly.
+    filters = []
+    if channels == 1:
+        filters.append("pan=stereo|c0=c0|c1=c0")
+    if sr != SAMPLE_RATE:
+        filters.append(f"aresample={SAMPLE_RATE}")
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(path),
+        "-sample_fmt",
+        "s16",
+    ]
+    if filters:
+        cmd += ["-af", ",".join(filters)]
+    cmd.append(str(out))
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg conversion failed on {path}:\n{proc.stderr}")
     return out, True
 
 
