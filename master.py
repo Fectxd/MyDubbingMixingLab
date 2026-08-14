@@ -1,19 +1,23 @@
-"""Compress and loudness-match actor tracks to a reference dialogue track.
+"""Adaptive compression + loudness match to a reference dialogue track.
 
-For every actor take the best available source (RE-USE enhanced if present,
-otherwise the original dry take) and:
-  1. apply dynamic compression (ffmpeg acomressor, dialogue-friendly defaults)
-  2. measure integrated loudness (pyloudnorm, ITU-R BS.1770)
-  3. apply gain so the take matches the reference dialogue's loudness
-     (default reference: work/separated/原片_dialog.wav, the separated
-     original dialogue; override with --reference or use --target-lufs)
+Key insight: dry takes have very different natural dynamics (condenser/phone
+mics are already heavily compressed; dynamic mics keep a wide range). A fixed
+compressor is wrong for both. So per take we:
+  1. measure the short-term dynamic range (p95-p5 of 100ms block levels)
+  2. if the take's DR is already <= the reference's DR (e.g. Adrian), skip the
+     compressor entirely and only loudness-match it
+  3. otherwise compress adaptively (threshold at the median block level, ratio
+     proportional to how far the DR exceeds the reference's DR)
+  4. loudness-match the active speech (silence-gated) to the reference's
+     active speech loudness
 
-Output goes to work/mastered/, which assemble_rpp.py uses in preference over
+Output goes to work/mastered/, used by assemble_rpp.py in preference to
 enhanced/original tracks.
 
 Usage:
     python master.py --actors test --reference work/separated/原片_dialog.wav
-    python master.py --actors test --target-lufs -23 --no-compress
+    python master.py --actors test --target-lufs -23 --target-dr 12
+    python master.py --actors test --no-compress
 """
 
 from __future__ import annotations
@@ -33,6 +37,8 @@ import soundfile as sf
 PROJECT_ROOT = Path(__file__).resolve().parent
 ENHANCED_DIR = PROJECT_ROOT / "work" / "enhanced"
 DEFAULT_REF = PROJECT_ROOT / "work" / "separated" / "原片_dialog.wav"
+BLOCK_SECS = 0.1
+SPEECH_GATE_DB = -45.0  # 100ms blocks above this RMS are treated as speech
 
 
 def keep_system_awake(enable: bool = True) -> None:
@@ -78,11 +84,36 @@ def pick_source(take: Path) -> tuple[Path, str]:
     return take, "original"
 
 
-def measure_lufs(path: Path) -> float:
+def measure_stats(path: Path) -> dict:
+    """Speech-gated dynamics + loudness for a wav.
+
+    Only 100ms blocks above SPEECH_GATE_DB are counted, so long silences in
+    sparse takes don't drag the average down (this is what made Adrian's hot
+    voice level invisible before).
+    """
     data, rate = sf.read(str(path), always_2d=True, dtype="float32")
     mono = data.mean(axis=1)
+    win = int(rate * BLOCK_SECS)
+    n = len(mono) // win
+    frames = mono[: n * win].reshape(n, win)
+    rms = np.sqrt((frames**2).mean(axis=1) + 1e-12)
+    rms_db = 20.0 * np.log10(rms)
+    speech = rms_db > SPEECH_GATE_DB
+    if speech.sum() < 20:
+        # degenerate case: use the loudest 5% of blocks instead
+        speech = np.zeros_like(rms_db, dtype=bool)
+        k = max(1, int(n * 0.05))
+        speech[np.argsort(rms_db)[-k:]] = True
+    p5, p50, p95 = np.percentile(rms_db[speech], [5, 50, 95])
     meter = pyln.Meter(rate)
-    return float(meter.integrated_loudness(mono))
+    speech_lufs = float(meter.integrated_loudness(frames[speech].reshape(-1)))
+    return {
+        "dr": float(p95 - p5),
+        "p50": float(p50),
+        "speech_lufs": speech_lufs,
+        "density": float(speech.mean()),
+        "rate": rate,
+    }
 
 
 def compress(src: Path, dst: Path, threshold: float, ratio: float, attack: float, release: float) -> None:
@@ -90,7 +121,7 @@ def compress(src: Path, dst: Path, threshold: float, ratio: float, attack: float
         [
             "-i", str(src),
             "-af",
-            f"acompressor=threshold={threshold}:ratio={ratio}:attack={attack}:release={release}",
+            f"acompressor=threshold={threshold:.5f}:ratio={ratio:.2f}:attack={attack:.0f}:release={release:.0f}",
             "-c:a", "pcm_s16le",
             str(dst),
         ]
@@ -108,20 +139,21 @@ def apply_gain_and_save(compressed: Path, out: Path, gain_db: float) -> dict:
             capped = True
     data = data * float(10 ** (gain_db / 20.0))
     sf.write(str(out), data, rate, subtype="PCM_16")
-    return {"gain_db": round(gain_db, 2), "gain_capped": capped, "peak": round(float(np.max(np.abs(data))), 3)}
+    return {"gain_db": round(gain_db, 2), "gain_capped": capped}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--actors", nargs="+", required=True, help="dry-take wav files or a folder")
     parser.add_argument("--reference", default=str(DEFAULT_REF), help="reference dialogue wav")
-    parser.add_argument("--target-lufs", type=float, default=None, help="fixed target instead of reference")
+    parser.add_argument("--target-lufs", type=float, default=None, help="fixed loudness target (default: reference)")
+    parser.add_argument("--target-dr", type=float, default=None, help="fixed dynamic-range target in dB (default: reference)")
     parser.add_argument("--outdir", default=str(PROJECT_ROOT / "work" / "mastered"))
-    parser.add_argument("--threshold", type=float, default=0.1, help="compressor threshold, linear (0.1 = -20 dB)")
-    parser.add_argument("--ratio", type=float, default=3.0, help="compressor ratio")
+    parser.add_argument("--ratio", type=float, default=None, help="override adaptive ratio")
+    parser.add_argument("--threshold", type=float, default=None, help="override compressor threshold (linear)")
     parser.add_argument("--attack", type=float, default=5.0, help="attack ms")
     parser.add_argument("--release", type=float, default=120.0, help="release ms")
-    parser.add_argument("--no-compress", action="store_true", help="skip the compressor, only loudness match")
+    parser.add_argument("--no-compress", action="store_true", help="skip compression entirely")
     args = parser.parse_args()
 
     keep_system_awake(True)
@@ -131,25 +163,26 @@ def main() -> int:
         return 1
 
     ref = Path(args.reference)
-    if args.target_lufs is not None:
-        target = float(args.target_lufs)
-        ref_lufs = None
-        print(f"目标响度: {target:.1f} LUFS（固定值）", flush=True)
+    if args.target_lufs is not None or args.target_dr is not None:
+        target_lufs = args.target_lufs if args.target_lufs is not None else -23.0
+        target_dr = args.target_dr if args.target_dr is not None else 12.0
+        ref_stats = None
+        print(f"固定目标: 响度 {target_lufs:.1f} LUFS, 动态范围 {target_dr:.0f} dB", flush=True)
     else:
         if not ref.exists():
             raise SystemExit(f"reference not found: {ref}")
-        target = measure_lufs(ref)
-        ref_lufs = target
-        print(f"参照轨: {ref.name}  integrated loudness {target:.1f} LUFS", flush=True)
+        ref_stats = measure_stats(ref)
+        target_lufs = ref_stats["speech_lufs"]
+        target_dr = ref_stats["dr"]
+        print(f"参照轨: {ref.name}  响度 {target_lufs:.1f} LUFS  动态范围 {target_dr:.1f} dB", flush=True)
 
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     tmpdir = outdir.parent / "tmp"
     tmpdir.mkdir(parents=True, exist_ok=True)
 
-    print(f"压缩: {'关' if args.no_compress else f'开 (threshold {args.threshold:.2f}, ratio {args.ratio:.0f}:1, attack {args.attack:.0f}ms, release {args.release:.0f}ms)'}", flush=True)
-    results = {"reference": str(ref) if ref_lufs is not None else None,
-               "target_lufs": round(target, 2), "tracks": []}
+    results = {"reference": str(ref) if ref_stats is not None else None,
+               "target_lufs": round(target_lufs, 2), "target_dr": round(target_dr, 1), "tracks": []}
     for take in takes:
         src, kind = pick_source(take)
         out = outdir / f"{take.stem}.wav"
@@ -158,21 +191,41 @@ def main() -> int:
             results["tracks"].append({"name": take.name, "status": "skipped"})
             continue
         t0 = time.time()
+        st = measure_stats(src)
         tmp = tmpdir / f"c_{take.stem}.wav"
+        compress_info = {}
         if args.no_compress:
             run_ffmpeg(["-i", str(src), "-c:a", "pcm_s16le", str(tmp)])
+            compress_info["compressed"] = False
+        elif st["dr"] <= target_dr + 1.0:
+            run_ffmpeg(["-i", str(src), "-c:a", "pcm_s16le", str(tmp)])
+            compress_info = {"compressed": False, "reason": "动态范围已接近/低于参照，跳过压缩"}
         else:
-            compress(src, tmp, args.threshold, args.ratio, args.attack, args.release)
-        measured = measure_lufs(tmp)
-        gain = target - measured
+            threshold = args.threshold if args.threshold is not None else float(10 ** (st["p50"] / 20.0))
+            threshold = min(0.9, max(0.02, threshold))
+            ratio = args.ratio if args.ratio is not None else min(8.0, max(1.2, (st["dr"] - 4.0) / (max(4.0, target_dr) - 4.0)))
+            compress(src, tmp, threshold, ratio, args.attack, args.release)
+            compress_info = {"compressed": True, "threshold": round(threshold, 4),
+                             "threshold_db": round(20 * np.log10(threshold), 1), "ratio": round(ratio, 2)}
+        measured = measure_stats(tmp)
+        gain = target_lufs - measured["speech_lufs"]
         info = apply_gain_and_save(tmp, out, gain)
+        final = measure_stats(out)
         tmp.unlink(missing_ok=True)
         results["tracks"].append({
             "name": take.name, "source_kind": kind, "source": str(src),
-            "measured_lufs": round(measured, 2), **info,
+            "measured_dr": round(st["dr"], 1), "target_dr": round(target_dr, 1),
+            **compress_info, "measured_lufs": round(measured["speech_lufs"], 2), **info,
+            "final_dr": round(final["dr"], 1), "final_lufs": round(final["speech_lufs"], 2),
+            "final_speech_median_db": round(final["p50"], 1),
         })
-        note = " (gain capped)" if info["gain_capped"] else ""
-        print(f"     {take.name}: {measured:.1f} -> {target:.1f} LUFS, gain {info['gain_db']:+.1f} dB{note} ({time.time() - t0:.0f}s)", flush=True)
+        if compress_info.get("compressed"):
+            print(f"     {take.name}: DR {st['dr']:.1f}->{final['dr']:.1f} dB, "
+                  f"threshold {compress_info['threshold_db']:.0f} dB, ratio {compress_info['ratio']:.1f}:1, "
+                  f"增益 {info['gain_db']:+.1f} dB ({time.time() - t0:.0f}s)", flush=True)
+        else:
+            print(f"     {take.name}: DR {st['dr']:.1f} dB (不压缩), 增益 {info['gain_db']:+.1f} dB "
+                  f"({time.time() - t0:.0f}s)", flush=True)
 
     report = outdir / "master_report.json"
     report.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
