@@ -146,26 +146,30 @@ def ffprobe_channels(path: Path) -> int:
 def build_mix(srcs: list[tuple[Path, float]], out: Path, limit: bool) -> float:
     """Sum all sources at unity (as the files-mode project plays them)."""
     out.parent.mkdir(parents=True, exist_ok=True)
+    n_in = len(srcs)
     cmd: list[str] = []
     for s, _ in srcs:
         cmd += ["-i", str(s)]
     # Per-input gain (voice-group boost on actors / background auto-balance),
-    # then sum WITHOUT input scaling (amix normalize=0) so the result equals
-    # REAPER's fader mix. Mono sources MUST be upmixed with pan (c1=c0) at
-    # unity: aformat's mono->stereo conversion applies equal-power -3 dB,
-    # which would silently make the voices 3 dB quieter than the project.
+    # then sum WITHOUT input scaling so the result equals REAPER's fader mix.
+    # amix's `normalize` option needs ffmpeg >= 5.1 (Colab ships 4.4), so we
+    # pre-scale every input by the input count N and use plain amix, which on
+    # every version divides the sum by N -> net unity sum.
+    # Mono sources MUST be upmixed with pan (c1=c0) at unity: aformat's
+    # mono->stereo conversion applies equal-power -3 dB, which would silently
+    # make the voices 3 dB quieter than the project.
     parts = []
     for i, (s, g) in enumerate(srcs):
         chain = f"[{i}:a]"
-        if g:
-            chain += f"volume={10 ** (g / 20.0):.6f},"
+        lin = 10 ** (g / 20.0) * n_in if g else float(n_in)
+        chain += f"volume={lin:.6f},"
         if ffprobe_channels(s) == 1:
             chain += "pan=stereo|c0=c0|c1=c0,"
         chain += f"aresample={AUDIO_SR},aformat=sample_fmts=fltp:channel_layouts=stereo[a{i}]"
         parts.append(chain)
     fc = ";".join(parts)
-    fc += ";" + "".join(f"[a{i}]" for i in range(len(srcs)))
-    fc += f"amix=inputs={len(srcs)}:normalize=0:dropout_transition=0"
+    fc += ";" + "".join(f"[a{i}]" for i in range(n_in))
+    fc += f"amix=inputs={n_in}:dropout_transition=0"
     if limit:
         fc += f",alimiter=limit={MASTER_LIMIT}:level=false:attack=5:release=50"
     fc += "[out]"

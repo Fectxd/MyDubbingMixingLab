@@ -180,7 +180,8 @@ python enhance.py --inputs test/*.wav --outdir work/enhanced
 RE-USE 做降噪/去混响/带宽扩展/低质量麦克风修复。注意：
 - 官方模型**只支持 CUDA**（拒绝 CPU），用 Google Colab/Kaggle 免费 T4 GPU 跑。
 - 整条流水线的 Colab 一键版见 `colab_full_pipeline.ipynb`（GitHub 打开 →
-  Open in Colab）：上传原片 + 干声 → 分离 → 修复 → 排工程 → 打包下载。
+  Open in Colab）：一键跑完 分离 → 修复 → 分析 → 排工程（files 模式）→
+  **合并成片**，打包下载，无需本机装依赖。
 - 非商用许可（NSCLv1）：论文/非商业用途没问题。
 - 修复后的文件放 `work/enhanced/`，`assemble_rpp.py` 会自动优先使用它们
   （有修复用修复，没有则用原始干声）。
